@@ -4,16 +4,20 @@
 const int minDose = 10;
 const int maxDose = 40;
 const int cupCount = 6;
-const int servoPerAngleTime = 1000 / 180;
-const int servoMinImpulse = 544;
-const int servoMaxImpulse = 2250;
 const int servoPerMlTime = 40;
 
 const int stepperFullRotateSteps = 4076 / 2;
 const int stepperAcceleration = 200;
-const int stepperParkStopAcceleration = 2000;
 const int stepperMaxSpeed = 200;
-
+const int startAngle = 10;
+const int cupPositions[] = {
+  60,
+  415,
+  790,
+  1120,
+  1460,
+  1810
+  };
 /*                                +-----+
                      +------------| USB |------------+
                      |            +-----+            |
@@ -26,8 +30,8 @@ const int stepperMaxSpeed = 200;
           CUP_3 C3   | [ ]A3       \_0_/       D6[ ]~|   D6   stepper
           CUP_4 C4   | [ ]A4/SDA               D5[ ]~|   D5   parkButtonPin
           CUP_5 C5   | [ ]A5/SCL               D4[ ] |   D4   pumpPin
-           dosePin   | [ ]A6              INT1/D3[ ]~|   D3
-        doseVccPin   | [ ]A7              INT0/D2[ ] |   D2   startButtonPin
+           dosePin   | [ ]A6              INT1/D3[ ]~|   D3   doseVccPin
+                     | [ ]A7              INT0/D2[ ] |   D2   startButtonPin
                      | [ ]5V                  GND[ ] |     
                 C6   | [ ]RST                 RST[ ] |   C6
                      | [ ]GND   5V MOSI GND   TX1[ ] |   D0
@@ -38,22 +42,36 @@ const int stepperMaxSpeed = 200;
                      +-------------------------------+
 */         
 
-const int cupButtonPins[] = {
-  A0,
-  A1,
-  A2,
-  A3,
-  A4,
-  A5
+class Cup {
+  const int _pin;
+  public:
+    Cup(int pin): _pin(pin) {
+    }
+
+    void setup() const {
+      pinMode(_pin, INPUT_PULLUP);
+    }
+
+    bool pressed() const {
+      return !digitalRead(_pin);
+    }
+};
+
+const Cup cups[] = {
+  Cup(A0),
+  Cup(A1),
+  Cup(A2),
+  Cup(A3),
+  Cup(A4),
+  Cup(A5)
 };
 
 const int dosePin = A6;
-const int doseVccPin = 7;
+const int doseVccPin = 3;
 const int startButtonPin = 2;
 const int pumpPin = 4;
 const int parkButtonPin = 5;
-AccelStepper stepper(AccelStepper::FULL4WIRE, 6, 7, 8, 9);
-
+AccelStepper stepper(AccelStepper::FULL4WIRE, 6, 8, 7, 9);
 
 void wakeUpNow() {
 }
@@ -61,11 +79,11 @@ void wakeUpNow() {
 void setup() {
   Serial.begin(9600);
   for(int cupButton = 0; cupButton < cupCount; cupButton++) {
-    pinMode(cupButtonPins[cupButton], INPUT_PULLUP);
+    cups[cupButton].setup();
   }
-  analogReference(EXTERNAL);
   pinMode(startButtonPin, INPUT_PULLUP);
   pinMode(doseVccPin, OUTPUT);
+  pinMode(pumpPin, OUTPUT);
 
   pinMode(parkButtonPin, INPUT_PULLUP);
   stepper.setMaxSpeed(stepperMaxSpeed);
@@ -73,40 +91,39 @@ void setup() {
 }
 
 void rotateArm(int cup) {
-  int angle = 180 - cup * (180 / (cupCount - 1));
-  Serial.println("Rotate arm to cup " + String(cup) + " at angle " + String(angle));
-
-  Serial.println("Rotate arm finished ");
+  stepper.enableOutputs();
+  stepper.moveTo(cupPositions[cup]);
+  while(stepper.isRunning()) {
+    stepper.run();
+  }
+  stepper.disableOutputs();
 }
 
 bool parkButtonPressed() {
   return !digitalRead(parkButtonPin);
 }
 
+bool startButtonPressed() {
+  return !digitalRead(startButtonPin);
+}
+
 bool park() {
-  Serial.println("Parking arm...");
+  stepper.enableOutputs();
   if(parkButtonPressed()) {
-    Serial.println("Already parked");
     return true;
   }
   stepper.setMaxSpeed(stepperMaxSpeed);
   stepper.setAcceleration(stepperAcceleration);
-  stepper.moveTo(stepperFullRotateSteps);
+  stepper.moveTo(-stepperFullRotateSteps);
   while(!parkButtonPressed() && stepper.isRunning() ) {
     stepper.run();
   }
+  delay(100);
   if (!parkButtonPressed()) {
-    Serial.println("Park failed.");
     return false;
   }
-  Serial.println("Park button pressed, stopping...");
-  stepper.setAcceleration(stepperParkStopAcceleration);
-  stepper.stop();
-  while(stepper.isRunning()) {
-    stepper.run();
-  }
-  Serial.println("Park finished");
-  stepper.setAcceleration(stepperAcceleration);
+  stepper.setCurrentPosition(0);
+  stepper.disableOutputs();
   return true;
 }
 
@@ -133,31 +150,56 @@ void sleepNow()
   detachInterrupt(digitalPinToInterrupt(startButtonPin));
 }
 
+//#define CALLIBRATION
+
+bool anyCupPressed() {
+  for(int cupButton = 0; cupButton < cupCount; cupButton++) {
+      if(cups[cupButton].pressed()) {
+        return true;
+      }
+  }
+  return false;
+}
+
 void loop() {
+  #ifdef CALLIBRATION
+  park();
+  int num = Serial.parseInt();
+  stepper.moveTo(num);
+  while(stepper.isRunning()) {
+    stepper.run();
+  }
+  delay(1000);
+  #else
   sleepNow();
   delay(100);
-  if (digitalRead(startButtonPin)) {
+  if (!startButtonPressed()) {
     return;
   }
-  park();
-  bool cups[cupCount];
-  bool anyCupPpressed = false;
-  for(int cupButton = 0; cupButton < cupCount; cupButton++) {
-    bool cupPressed = !digitalRead(cupButtonPins[cupButton]);
-    anyCupPpressed = anyCupPpressed || cupPressed;
-    cups[cupButton] = cupPressed;
-  }
-  if(!anyCupPpressed) {
-    return;
-  }
-
-  int dose = getDose();
-  for(int cupButton = 0; cupButton < cupCount; cupButton++) {
-    if (cups[cupButton]) {
-      rotateArm(cupButton);
-      pump(dose);
-      delay(1500);
+  if(anyCupPressed()) {
+    park();
+    int dose = getDose();
+    for(int cupButton = 0; cupButton < cupCount; cupButton++) {
+      if (cups[cupButton].pressed()) {
+        rotateArm(cupButton);
+        pump(dose);
+        delay(500);
+      }
     }
-  }
-  delay(100);
+    rotateArm(0);
+  } else {
+    if(startButtonPressed()) {
+      delay(2000);
+      if (!startButtonPressed()) {
+        return;
+      }
+      park();
+      rotateArm(0);
+      digitalWrite(pumpPin, HIGH);
+      while(startButtonPressed()) {
+      }
+      digitalWrite(pumpPin, LOW);
+    }
+  }  
+  #endif
 }
